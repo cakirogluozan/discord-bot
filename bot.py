@@ -15,7 +15,7 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 sound_map = {}
 categories = {}
 
-# First, collect all categories
+# First, collect all categories and sort them
 for f in os.listdir('sounds'):
     if 'Zone' in f:
         continue
@@ -27,6 +27,13 @@ for f in os.listdir('sounds'):
         categories[category].append(sound_name)
         sound_map[name] = os.path.join('sounds', f)
 
+# Sort categories alphabetically
+sorted_categories = sorted(categories.keys())
+
+# Sort sounds within each category
+for category in sorted_categories:
+    categories[category].sort()
+
 # Create a mapping of categories to styles
 available_styles = [
     discord.ButtonStyle.primary,    # Blurple
@@ -37,7 +44,7 @@ available_styles = [
 
 # Assign styles to categories
 category_styles = {}
-for i, category in enumerate(categories.keys()):
+for i, category in enumerate(sorted_categories):
     category_styles[category] = available_styles[i % len(available_styles)]
 
 # Store the persistent message ID and view
@@ -139,7 +146,7 @@ async def soundboard(ctx):
     # Initialize variables for pagination
     buttons_per_page = 15
     current_page = 0
-    current_category = list(categories.keys())[0]  # Start with first category
+    current_category = sorted_categories[0]  # Start with first sorted category
     
     # Function to create category buttons
     def create_category_buttons():
@@ -151,7 +158,7 @@ async def soundboard(ctx):
         total_pages = (len(category_sounds) + buttons_per_page - 1) // buttons_per_page
         
         # First row: Category navigation (Red)
-        if len(categories) > 1:
+        if len(sorted_categories) > 1:
             prev_cat = Button(
                 label="◀️ Prev Category", 
                 style=discord.ButtonStyle.danger
@@ -163,15 +170,15 @@ async def soundboard(ctx):
             
             async def prev_category_callback(interaction):
                 nonlocal current_category, current_page
-                current_idx = list(categories.keys()).index(current_category)
-                current_category = list(categories.keys())[(current_idx - 1) % len(categories)]
+                current_idx = sorted_categories.index(current_category)
+                current_category = sorted_categories[(current_idx - 1) % len(sorted_categories)]
                 current_page = 0
                 await update_view(interaction)
                 
             async def next_category_callback(interaction):
                 nonlocal current_category, current_page
-                current_idx = list(categories.keys()).index(current_category)
-                current_category = list(categories.keys())[(current_idx + 1) % len(categories)]
+                current_idx = sorted_categories.index(current_category)
+                current_category = sorted_categories[(current_idx + 1) % len(sorted_categories)]
                 current_page = 0
                 await update_view(interaction)
             
