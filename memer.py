@@ -128,10 +128,16 @@ class SoundButton(Button):
             for item in persistent_view.children:
                 item.disabled = False
 
-@bot.command()
-async def soundboard(ctx):
+@bot.command(name='memer')
+async def memer(ctx):
     global persistent_message_id, persistent_view
     
+    # Delete the command message
+    try:
+        await ctx.message.delete()
+    except discord.errors.NotFound:
+        pass  # Ignore if the message was already deleted
+
     # Delete previous bot messages in the channel
     async for message in ctx.channel.history(limit=100):  # Limit to last 100 messages
         if message.author == bot.user:  # Check if message is from our bot
