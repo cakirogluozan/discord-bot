@@ -11,28 +11,48 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="/", intents=intents)
 
-# Modify the sound map to include categories and create dynamic category styles
+# --- Updated Sound Data Loading ---
 sound_map = {}
 categories = {}
 
-# First, collect all categories and sort them
-for f in os.listdir('sounds'):
-    if 'Zone' in f:
-        continue
-    name = os.path.splitext(f)[0]
-    if '-' in name:
-        category, sound_name = name.split('-', 1)  # Split only on first '-'
-        if category not in categories:
-            categories[category] = []
-        categories[category].append(sound_name)
-        sound_map[name] = os.path.join('sounds', f)
+# Iterate through items in the 'sounds' directory
+for item_name in os.listdir('sounds'):
+    item_path = os.path.join('sounds', item_name)
+    
+    # Check if the item is a directory (this will be our category)
+    if os.path.isdir(item_path):
+        category_name = item_name  # The directory name is the category
+        
+        if category_name not in categories:
+            categories[category_name] = []
+            
+        # List files within this category directory
+        for sound_filename in os.listdir(item_path):
+            # You might want to skip system files like 'Zone.Identifier' if they appear
+            if 'Zone' in sound_filename or sound_filename.startswith('.'):
+                continue
+            
+            sound_name_base, sound_ext = os.path.splitext(sound_filename)
+            
+            # Ensure it's a common audio file type (optional, but good practice)
+            if sound_ext.lower() not in ['.mp3', '.wav', '.ogg', '.m4a']: # Add more if needed
+                continue
 
+            categories[category_name].append(sound_name_base)
+            
+            # The key for sound_map should still uniquely identify the sound.
+            # Using "category-sound_name_base" format maintains consistency 
+            # with how SoundButton and SoundboardView expect to look up sounds.
+            full_name_key = f"{category_name}-{sound_name_base}"
+            sound_map[full_name_key] = os.path.join(item_path, sound_filename)
+            
 # Sort categories alphabetically
 sorted_categories = sorted(categories.keys())
 
 # Sort sounds within each category
 for category in sorted_categories:
     categories[category].sort()
+# --- End of Updated Sound Data Loading ---
 
 # Create a mapping of categories to styles
 available_styles = [

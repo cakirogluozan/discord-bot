@@ -2,3 +2,4 @@ venv/
 __pycache__/
 *.pyc
 pws.py
+prev_sounds/
