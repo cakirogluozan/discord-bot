@@ -4,6 +4,13 @@ from discord.ui import Button, View
 import os
 from pws import discord_token
 import asyncio
+import time
+import logging
+import random
+
+# Set up logging to see what's happening
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('discord')
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -58,7 +65,6 @@ for category in sorted_categories:
 available_styles = [
     discord.ButtonStyle.primary,    # Blurple
     discord.ButtonStyle.success,    # Green
-    discord.ButtonStyle.danger,     # Red
     discord.ButtonStyle.secondary,  # Grey
 ]
 
@@ -73,6 +79,130 @@ persistent_view = None
 
 # Track if a sound is currently playing
 is_playing = False
+
+# Track voice client connection attempts
+connection_attempts = {}
+
+# Connection state tracking
+voice_connection_issues = {}
+
+# Track successful voice servers
+working_voice_servers = set()
+
+async def force_disconnect_and_wait(guild, wait_time=5):
+    """Force disconnect and wait for cleanup"""
+    if guild.voice_client:
+        try:
+            await guild.voice_client.disconnect()
+            print(f"Force disconnected from voice channel")
+        except Exception as e:
+            print(f"Error during force disconnect: {e}")
+    
+    await asyncio.sleep(wait_time)
+
+async def try_alternative_connection(guild, voice_channel):
+    """Try alternative connection methods when standard connection fails"""
+    
+    # Method 1: Try with different timeout
+    try:
+        print("Trying alternative connection method 1: Extended timeout")
+        await voice_channel.connect(timeout=60.0)
+        await asyncio.sleep(2)
+        if guild.voice_client and guild.voice_client.is_connected():
+            return guild.voice_client
+    except Exception as e:
+        print(f"Alternative method 1 failed: {e}")
+    
+    # Method 2: Try with different connection parameters
+    try:
+        print("Trying alternative connection method 2: Different parameters")
+        # Force disconnect first
+        if guild.voice_client:
+            await guild.voice_client.disconnect()
+            await asyncio.sleep(3)
+        
+        # Try connecting with minimal parameters
+        await voice_channel.connect()
+        await asyncio.sleep(2)
+        if guild.voice_client and guild.voice_client.is_connected():
+            return guild.voice_client
+    except Exception as e:
+        print(f"Alternative method 2 failed: {e}")
+    
+    return None
+
+async def connect_to_voice_channel(guild, voice_channel, max_retries=3):
+    """Improved voice connection with aggressive retry logic and 4006 handling"""
+    
+    # Check if we've had recent issues with this guild
+    guild_id = str(guild.id)
+    if guild_id in voice_connection_issues:
+        last_issue_time = voice_connection_issues[guild_id]
+        if time.time() - last_issue_time < 120:  # Wait 2 minutes between attempts
+            raise Exception("Recent voice connection issues detected. Please wait 2 minutes before trying again.")
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"Voice connection attempt {attempt + 1}/{max_retries}")
+            
+            # Force disconnect if already connected
+            if guild.voice_client:
+                await force_disconnect_and_wait(guild, 3)
+            
+            # Try to connect with a longer timeout
+            await voice_channel.connect(timeout=45.0)
+            
+            # Wait a moment to ensure connection is stable
+            await asyncio.sleep(2)
+            
+            # Verify connection is working
+            if guild.voice_client and guild.voice_client.is_connected():
+                print("Voice connection successful!")
+                return guild.voice_client
+                
+        except discord.ConnectionClosed as e:
+            print(f"Connection attempt {attempt + 1} failed with code {e.code}")
+            
+            if e.code == 4006:  # Session timeout/invalid
+                print(f"4006 error detected - trying alternative methods")
+                
+                # Try alternative connection methods
+                alt_client = await try_alternative_connection(guild, voice_channel)
+                if alt_client:
+                    print("Alternative connection method succeeded!")
+                    return alt_client
+                
+                # For 4006, we need to be more aggressive
+                await force_disconnect_and_wait(guild, 8)
+                
+                if attempt < max_retries - 1:
+                    wait_time = min(15, 3 ** attempt)  # Cap at 15 seconds
+                    print(f"Waiting {wait_time} seconds before retry...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Mark this guild as having issues
+                    voice_connection_issues[guild_id] = time.time()
+                    raise Exception("Discord voice servers are experiencing issues (4006 error). Please try again in 2 minutes.")
+            
+            raise e
+            
+        except discord.ClientException as e:
+            if "Already connected to a voice channel" in str(e):
+                if guild.voice_client and guild.voice_client.is_connected():
+                    return guild.voice_client
+            raise e
+            
+        except Exception as e:
+            print(f"Voice connection attempt {attempt + 1} failed: {str(e)}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(3)
+                continue
+            raise e
+    
+    # Mark this guild as having issues
+    voice_connection_issues[guild_id] = time.time()
+    raise Exception(f"Failed to connect to voice channel after {max_retries} attempts")
 
 class SoundButton(Button):
     def __init__(self, label, sound_file, category):
@@ -93,17 +223,8 @@ class SoundButton(Button):
             voice_channel = user.voice.channel
 
             try:
-                # Check if bot is already connected to a voice channel
-                if interaction.guild.voice_client:
-                    # If connected to a different channel, move to the new one
-                    if interaction.guild.voice_client.channel != voice_channel:
-                        await interaction.guild.voice_client.move_to(voice_channel)
-                else:
-                    # If not connected, connect to the voice channel
-                    await voice_channel.connect()
-
-                # Get the voice client
-                vc = interaction.guild.voice_client
+                # Use improved connection function
+                vc = await connect_to_voice_channel(interaction.guild, voice_channel)
 
                 # Verify file exists and print path for debugging
                 if not os.path.exists(self.sound_file):
@@ -131,6 +252,18 @@ class SoundButton(Button):
                         item.disabled = False
                     await interaction.response.send_message(f"❌ Error playing sound: {str(e)}", ephemeral=True)
 
+            except discord.ConnectionClosed as e:
+                error_msg = "❌ Voice connection failed"
+                if e.code == 4006:
+                    error_msg += " (Discord server issue - please try again in 2 minutes)"
+                elif e.code == 4001:
+                    error_msg += " (Unauthorized - check bot permissions)"
+                else:
+                    error_msg += f" (Error code: {e.code})"
+                
+                print(f"Voice connection error: {str(e)}")  # Debug print
+                await interaction.response.send_message(error_msg, ephemeral=True)
+                
             except Exception as e:
                 print(f"Connection error: {str(e)}")  # Debug print
                 await interaction.response.send_message(f"❌ Error connecting to voice channel: {str(e)}", ephemeral=True)
@@ -322,8 +455,129 @@ async def disconnect(ctx):
     else:
         await ctx.send("❌ I'm not connected to any voice channel!", ephemeral=True)
 
+@bot.command()
+async def voicefix(ctx):
+    """Force disconnect and clear any stuck voice states"""
+    global voice_connection_issues
+    
+    # Clear connection issue tracking for this guild
+    guild_id = str(ctx.guild.id)
+    if guild_id in voice_connection_issues:
+        del voice_connection_issues[guild_id]
+        print(f"Cleared connection issue tracking for guild {guild_id}")
+    
+    if ctx.guild.voice_client:
+        try:
+            await ctx.guild.voice_client.disconnect()
+            await ctx.send("✅ Force disconnected from voice channel and cleared issue tracking!", ephemeral=True)
+        except Exception as e:
+            await ctx.send(f"❌ Error during disconnect: {str(e)}", ephemeral=True)
+    else:
+        await ctx.send("✅ No voice client to disconnect! Issue tracking cleared.", ephemeral=True)
+
+@bot.command()
+async def clearvoiceissues(ctx):
+    """Clear all voice connection issue tracking"""
+    global voice_connection_issues
+    voice_connection_issues.clear()
+    await ctx.send("✅ Cleared all voice connection issue tracking!", ephemeral=True)
+
+@bot.command()
+async def voicenetwork(ctx):
+    """Test network connectivity to Discord voice servers"""
+    import socket
+    
+    await ctx.send("🌐 Testing network connectivity to Discord voice servers...", ephemeral=True)
+    
+    # Test Discord API
+    try:
+        socket.create_connection(("discord.com", 443), timeout=10)
+        await ctx.send("✅ Discord API: OK", ephemeral=True)
+    except Exception as e:
+        await ctx.send(f"❌ Discord API: FAILED - {str(e)}", ephemeral=True)
+        return
+    
+    # Test Discord Gateway
+    try:
+        socket.create_connection(("gateway.discord.gg", 443), timeout=10)
+        await ctx.send("✅ Discord Gateway: OK", ephemeral=True)
+    except Exception as e:
+        await ctx.send(f"❌ Discord Gateway: FAILED - {str(e)}", ephemeral=True)
+    
+    # Test specific voice server from logs
+    try:
+        socket.create_connection(("c-fra16-e2ce8198.discord.media", 443), timeout=10)
+        await ctx.send("✅ Voice server c-fra16-e2ce8198.discord.media: OK", ephemeral=True)
+    except Exception as e:
+        await ctx.send(f"❌ Voice server c-fra16-e2ce8198.discord.media: FAILED - {str(e)}", ephemeral=True)
+    
+    # Test alternative voice servers
+    alternative_servers = [
+        "c-fra16-e2ce8199.discord.media",
+        "c-fra16-e2ce8200.discord.media",
+        "c-fra16-e2ce8201.discord.media"
+    ]
+    
+    for server in alternative_servers:
+        try:
+            socket.create_connection((server, 443), timeout=10)
+            await ctx.send(f"✅ Voice server {server}: OK", ephemeral=True)
+        except Exception as e:
+            await ctx.send(f"❌ Voice server {server}: FAILED - {str(e)}", ephemeral=True)
+    
+    await ctx.send("🎯 Network tests complete!", ephemeral=True)
+
+@bot.command()
+async def voiceinfo(ctx):
+    """Show detailed voice connection information"""
+    vc = ctx.guild.voice_client
+    if vc:
+        status = "Connected" if vc.is_connected() else "Disconnected"
+        channel_name = vc.channel.name if vc.channel else "None"
+        endpoint = vc.endpoint if hasattr(vc, 'endpoint') else "Unknown"
+        
+        info = f"🎵 **Voice Client Info:**\n"
+        info += f"📡 Status: {status}\n"
+        info += f"📺 Channel: {channel_name}\n"
+        info += f"🔊 Playing: {vc.is_playing()}\n"
+        info += f"🌐 Endpoint: {endpoint}\n"
+        info += f"🔗 Latency: {vc.latency:.3f}s" if hasattr(vc, 'latency') else "🔗 Latency: Unknown"
+        
+        await ctx.send(info, ephemeral=True)
+    else:
+        await ctx.send("❌ Not connected to any voice channel", ephemeral=True)
+
+@bot.command()
+async def voicestatus(ctx):
+    """Check the current voice connection status"""
+    vc = ctx.guild.voice_client
+    if vc:
+        status = "Connected" if vc.is_connected() else "Disconnected"
+        channel_name = vc.channel.name if vc.channel else "None"
+        await ctx.send(f"🎵 **Voice Status:**\n📡 Status: {status}\n📺 Channel: {channel_name}\n🔊 Playing: {vc.is_playing()}", ephemeral=True)
+    else:
+        await ctx.send("❌ Not connected to any voice channel", ephemeral=True)
+
 @bot.event
 async def on_ready():
     print(f"🎉 Logged in as {bot.user}")
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Handle voice state changes to clean up when users leave"""
+    # If the bot is disconnected from voice, reset the playing flag
+    if member.id == bot.user.id and before.channel and not after.channel:
+        global is_playing
+        is_playing = False
+        print("Bot disconnected from voice channel, resetting playing flag")
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Global error handler"""
+    if isinstance(error, commands.CommandNotFound):
+        return  # Ignore command not found errors
+    
+    print(f"Command error in {ctx.command}: {error}")
+    await ctx.send(f"❌ An error occurred: {str(error)}", ephemeral=True)
 
 bot.run(discord_token)
